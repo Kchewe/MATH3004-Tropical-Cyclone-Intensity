@@ -1,0 +1,254 @@
+```{r}
+install.packages(c("readxl", "ggplot2", "dplyr", "tidyr", "corrplot", 
+                   "extRemes", "mgcv", "gridExtra"))
+```
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(corrplot)
+library(extRemes)
+library(mgcv)
+library(gridExtra)
+```
+
+```{r}
+df <- read_excel("envDataset_12h_10x10_with_mask - Copy.xlsx", sheet = "in")
+
+# Quick check
+dim(df)                    # should be ~30,827 rows × 151 columns
+table(df$basin)            # WP, SP, SI, NI counts
+table(df$TC_genesis)       # 0 vs 1
+head(df[, c("basin", "sea_surface_temperature", "mean_sea_level_pressure", "TC_genesis")])
+```
+```{r}
+df %>% 
+  group_by(basin) %>% 
+  summarise(
+    Total_rows = n(),
+    TC_genesis_1 = sum(TC_genesis == 1),
+    TC_genesis_0 = sum(TC_genesis == 0),
+    Percent_TCs = round(mean(TC_genesis)*100, 1)
+  )
+```
+
+```{r}
+df <- df %>%
+  mutate(surface_wind = sqrt(wind_u^2 + wind_v^2))
+
+# Key variables we care about
+key_vars <- c("sea_surface_temperature", "mean_sea_level_pressure", 
+              "relative_humidity", "vorticity_relative", 
+              "vertical_wind_shear_between_200_hPa_and_850_hPa", "surface_wind")
+
+# 1. Boxplots by basin + TC_genesis (overlaps visible here)
+for (var in key_vars) {
+  p <- ggplot(df, aes(x = basin, y = !!sym(var), fill = factor(TC_genesis))) +
+    geom_boxplot() +
+    labs(title = paste(var, "by Basin and TC_genesis"),
+         subtitle = "Overlap = similar environmental conditions across basins") +
+    theme_minimal()
+  print(p)
+  ggsave(paste0("boxplot_", var, ".png"), p, width = 8, height = 5)
+}
+```
+
+```{r}
+tc_only <- df %>% filter(TC_genesis == 1)
+
+# 1. Summary table per basin (easy to copy into your report)
+summary_table <- tc_only %>%
+  group_by(basin) %>%
+  summarise(
+    n_TCs = n(),
+    Mean_wind = round(mean(surface_wind, na.rm = TRUE), 2),
+    Max_wind = round(max(surface_wind, na.rm = TRUE), 2),
+    Mean_SST = round(mean(sea_surface_temperature, na.rm = TRUE), 2),
+    Mean_MSLP = round(mean(mean_sea_level_pressure, na.rm = TRUE), 2),
+    Mean_shear_200_850 = round(mean(`vertical_wind_shear_between_200_hPa_and_850_hPa`, na.rm = TRUE), 2)
+  )
+print(summary_table)
+```
+
+```{r}
+# 2. Density plot of intensity (surface_wind) by basin – shows differences
+p_density <- ggplot(tc_only, aes(x = surface_wind, fill = basin)) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Distribution of Cyclone Intensity (surface wind) – genesis=1 only",
+       subtitle = "WP usually strongest, SI weakest") +
+  theme_minimal()
+print(p_density)
+ggsave("intensity_density_genesis1.png", p_density, width = 8, height = 5)
+```
+
+```{r}
+# Create pressure proxy (higher value = stronger storm, exactly like wind)
+tc_only <- tc_only %>%
+  mutate(pressure_intensity = -mean_sea_level_pressure)
+
+# Density plot for pressure (parallel to your wind plot)
+p_pressure <- ggplot(tc_only, aes(x = pressure_intensity, fill = basin)) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Distribution of Cyclone Intensity (Pressure proxy: -MSLP) – genesis=1 only",
+       subtitle = "Higher value = lower central pressure = stronger storm",
+       x = "Pressure intensity (-MSLP)") +
+  theme_minimal()
+print(p_pressure)
+ggsave("pressure_intensity_density_genesis1.png", p_pressure, width = 8, height = 5)
+```
+```{r}
+summary_both <- tc_only %>%
+  group_by(basin) %>%
+  summarise(
+    n_TCs                  = n(),
+    Mean_wind              = round(mean(surface_wind, na.rm = TRUE), 2),
+    Max_wind               = round(max(surface_wind, na.rm = TRUE), 2),
+    Mean_MSLP              = round(mean(mean_sea_level_pressure, na.rm = TRUE), 2),
+    Min_MSLP               = round(min(mean_sea_level_pressure, na.rm = TRUE), 2),
+    Mean_pressure_intensity = round(mean(pressure_intensity, na.rm = TRUE), 2)
+  )
+print(summary_both)
+```
+
+```{r}
+wp <- df %>% 
+  filter(basin == "WP", TC_genesis == 1) %>% 
+  mutate(pressure_intensity = -mean_sea_level_pressure)
+
+print(paste("WP has", nrow(wp), "TC genesis events"))
+```
+```{r}
+wp_summary <- wp %>% 
+  summarise(
+    n = n(),
+    Mean_wind = round(mean(surface_wind), 2),
+    Max_wind = round(max(surface_wind), 2),
+    Mean_MSLP = round(mean(mean_sea_level_pressure), 2),
+    Min_MSLP = round(min(mean_sea_level_pressure), 2)
+  )
+print(wp_summary)
+```
+```{r}
+# Create blocks (~1 year at 12-hourly) — adjust divisor if needed
+wp <- wp %>% 
+  mutate(block = floor((row_number()-1)/730) + 1)
+
+block_max_wp <- wp %>% 
+  group_by(block) %>% 
+  summarise(
+    max_wind = max(surface_wind),
+    max_pressure_int = max(pressure_intensity)
+  ) %>% ungroup()
+```
+
+```{r}
+wp <- df %>% 
+  filter(basin == "WP", TC_genesis == 1) %>% 
+  mutate(
+    pressure_intensity = -mean_sea_level_pressure,
+    block = floor((row_number() - 1) / 20) + 1   # ← changed from 730 to 20
+  )
+```
+
+```{r}
+block_max_wp <- wp %>% 
+  group_by(block) %>% 
+  summarise(
+    max_wind = max(surface_wind, na.rm = TRUE),
+    max_pressure_int = max(pressure_intensity, na.rm = TRUE)
+  ) %>% 
+  ungroup()
+```
+
+```{r}
+print(paste("Number of blocks created:", nrow(block_max_wp)))   # should be ~43–44
+print(summary(block_max_wp))
+```
+
+
+```{r}
+library(extRemes)
+# Now fit GEV — this will work
+gev_wind <- fevd(block_max_wp$max_wind, type = "GEV")
+gev_press <- fevd(block_max_wp$max_pressure_int, type = "GEV")
+
+print("=== GEV Wind (WP) ==="); print(gev_wind)
+print("=== GEV Pressure Intensity (WP) ==="); print(gev_press)
+```
+```{r}
+rl_wind   <- return.level(gev_wind,   return.period = c(10, 50, 100))
+rl_press  <- return.level(gev_press,  return.period = c(10, 50, 100))
+
+print("Wind return levels (m/s):"); print(rl_wind)
+print("Pressure intensity return levels (-hPa):"); print(rl_press)
+```
+```{r}
+# Add covariates (mean per block)
+cov_wp <- wp %>% 
+  group_by(block) %>% 
+  summarise(
+    SST = mean(sea_surface_temperature, na.rm = TRUE),
+    shear_200_850 = mean(`vertical_wind_shear_between_200_hPa_and_850_hPa`, na.rm = TRUE),
+    RH = mean(relative_humidity, na.rm = TRUE)
+  ) %>% ungroup()
+
+block_max_cov <- left_join(block_max_wp, cov_wp, by = "block")
+
+# Non-stationary GEV (location depends on covariates)
+gev_ns_wind <- fevd(block_max_cov$max_wind, data = block_max_cov,
+                    location.fun = ~ SST + shear_200_850 + RH, type = "GEV")
+
+gev_ns_press <- fevd(block_max_cov$max_pressure_int, data = block_max_cov,
+                     location.fun = ~ SST + shear_200_850 + RH, type = "GEV")
+
+print("=== Non-stationary GEV Wind (WP) ==="); print(gev_ns_wind)
+print("=== Non-stationary GEV Pressure (WP) ==="); print(gev_ns_press)
+```
+
+```{r}
+#GLM & GAM for surface wind (Gamma family)
+glm_wind <- glm(surface_wind ~ sea_surface_temperature + 
+                `vertical_wind_shear_between_200_hPa_and_850_hPa` + 
+                relative_humidity + vorticity_relative,
+                data = wp, family = Gamma(link = "log"))
+
+gam_wind <- gam(surface_wind ~ s(sea_surface_temperature) + 
+                s(`vertical_wind_shear_between_200_hPa_and_850_hPa`) + 
+                s(relative_humidity) + s(vorticity_relative),
+                data = wp, family = Gamma(link = "log"), method = "REML")
+
+summary(glm_wind)
+summary(gam_wind)
+plot(gam_wind, pages = 1, main = "GAM smooths - Wind intensity (WP)")   # visual proof of non-linearity
+```
+```{r}
+# Same models for pressure intensity
+glm_press <- glm(pressure_intensity ~ sea_surface_temperature + 
+                 `vertical_wind_shear_between_200_hPa_and_850_hPa` + 
+                 relative_humidity + vorticity_relative,
+                 data = wp, family = Gamma(link = "log"))
+
+gam_press <- gam(pressure_intensity ~ s(sea_surface_temperature) + 
+                 s(`vertical_wind_shear_between_200_hPa_and_850_hPa`) + 
+                 s(relative_humidity) + s(vorticity_relative),
+                 data = wp, family = Gamma(link = "log"), method = "REML")
+
+summary(gam_press)
+plot(gam_press, pages = 1, main = "GAM smooths - Pressure intensity (WP)")
+What to report from the models
+
+Look at p-values in summary(glm_…) — significant covariates = important drivers.
+Look at edf (effective degrees of freedom) in summary(gam_…) — edf > 1 means non-linear (GAM wins).
+The smooth plots (plot(gam_…)) are gold — screenshot them and say “Figure X shows non-linear effects of SST and shear on intensity.”
+
+Run the code above, send me the summary(gam_wind) and summary(gam_press) output (or screenshots), and I’ll:
+
+Write the full “Results – Covariate Effects” subsection
+Interpret which variables matter most
+Add a comparison table (GLM vs GAM AIC)
+
+You now have the complete theory + code for objective 5. This will make your supervisor very happy. Paste the output whenever you run it and we’ll finish the results section today!9.4sExpert
+```
+
